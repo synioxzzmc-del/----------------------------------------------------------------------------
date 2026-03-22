@@ -1,62 +1,156 @@
 import discord
-import anthropic
-import os
+from discord.ext import commands
 from flask import Flask
 import threading
+import os
+import time
 
-# ── Keep-alive web server for Render/UptimeRobot ──────────────────
+# ── Keep-alive ─────────────────────────────────────────────────────
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "Bot is alive!"
+    return "Honey Bee is alive! 🐝"
 
-def run_web():
-    app.run(host="0.0.0.0", port=8080)
+threading.Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
 
-threading.Thread(target=run_web, daemon=True).start()
+# ── Config ─────────────────────────────────────────────────────────
+LTC_ADDRESS  = "LMSi7L5zdc6AsaJ5JgxUAPTmjnMJK1raKS"
+GAMEPASS_URL = "https://www.roblox.com/game-pass/1502229786/1000"
+PRICE_LTC    = "0.40$"
+PRICE_ROBUX  = "100 Robux"
+OWNER_ROLE   = "."  # only this role can use !setup
 
-# ── Discord bot setup ─────────────────────────────────────────────
+COLOUR = 0x1a1a2e
+ACCENT = 0xf5c518
+ERROR  = 0xff3333
+OK     = 0x39ff14
+
+# ── Bot setup ──────────────────────────────────────────────────────
 intents = discord.Intents.default()
 intents.message_content = True
-client = discord.Client(intents=intents)
+intents.members = True
+bot = commands.Bot(command_prefix="!", intents=intents)
 
-anthropic_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+def embed(title, desc=None, color=COLOUR):
+    e = discord.Embed(title=title, description=desc, color=color)
+    e.set_footer(text="🐝 Honey Bee")
+    return e
 
-@client.event
-async def on_ready():
-    print(f"Logged in as {client.user}")
+# ── Shop dropdown ──────────────────────────────────────────────────
+class PaymentSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="Pay with LTC", description=f"{PRICE_LTC} in LTC", emoji="💰"),
+            discord.SelectOption(label="Pay with Robux", description=f"{PRICE_ROBUX} gamepass", emoji="🎮"),
+        ]
+        super().__init__(placeholder="Choose payment method...", options=options)
 
-@client.event
-async def on_message(message):
-    # Ignore messages from the bot itself
-    if message.author == client.user:
-        return
+    async def callback(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        member = interaction.user
 
-    # Only respond when the bot is @mentioned
-    if client.user not in message.mentions:
-        return
+        # Check if ticket already exists
+        existing = discord.utils.get(guild.text_channels, name=f"ticket-{member.name.lower()}")
+        if existing:
+            await interaction.response.send_message(
+                embed=embed("⚠️ Ticket exists.", f"You already have a ticket: {existing.mention}", ERROR),
+                ephemeral=True
+            )
+            return
 
-    # Remove the mention from the message text
-    user_text = message.content.replace(f"<@{client.user.id}>", "").strip()
+        # Get owner role for permissions
+        owner_role = discord.utils.get(guild.roles, name=OWNER_ROLE)
 
-    if not user_text:
-        await message.reply("Hey! Ask me anything 👋")
-        return
+        # Create private channel
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            member: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+        }
+        if owner_role:
+            overwrites[owner_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
 
-    async with message.channel.typing():
-        response = anthropic_client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=1024,
-            system="You are a helpful and friendly Discord bot assistant.",
-            messages=[{"role": "user", "content": user_text}]
+        channel = await guild.create_text_channel(
+            name=f"ticket-{member.name.lower()}",
+            overwrites=overwrites,
+            reason="Shop ticket"
         )
-        reply = response.content[0].text
 
-    # Discord has a 2000 char limit per message
-    if len(reply) > 2000:
-        reply = reply[:1997] + "..."
+        # Send payment info based on selection
+        if self.values[0] == "Pay with LTC":
+            e = discord.Embed(title="🐝 BSS Sign — LTC Payment", color=ACCENT)
+            e.add_field(name="💰 Price", value=f"`{PRICE_LTC}`", inline=True)
+            e.add_field(name="📦 Item", value="BSS Sign", inline=True)
+            e.add_field(name="🏦 LTC Address", value=f"`{LTC_ADDRESS}`", inline=False)
+            e.add_field(name="📌 Instructions", value="1. Send exactly **$0.40 in LTC** to the address above\n2. Send a screenshot of the transaction here\n3. Staff will deliver your sign!", inline=False)
+            e.set_footer(text="🐝 Honey Bee")
+        else:
+            e = discord.Embed(title="🐝 BSS Sign — Robux Payment", color=ACCENT)
+            e.add_field(name="🎮 Price", value=f"`{PRICE_ROBUX}`", inline=True)
+            e.add_field(name="📦 Item", value="BSS Sign", inline=True)
+            e.add_field(name="🔗 Gamepass Link", value=f"[Click here to buy]({GAMEPASS_URL})", inline=False)
+            e.add_field(name="📌 Instructions", value="1. Purchase the gamepass at the link above\n2. Send your **Roblox username** here\n3. Staff will deliver your sign!", inline=False)
+            e.set_footer(text="🐝 Honey Bee")
 
-    await message.reply(reply)
+        # Close ticket button
+        close_view = discord.ui.View()
+        close_btn = discord.ui.Button(label="🔒 Close Ticket", style=discord.ButtonStyle.danger)
 
-client.run(os.environ["DISCORD_TOKEN"])
+        async def close_callback(i: discord.Interaction):
+            await i.response.send_message(embed=embed("🔒 Closing ticket...", color=ERROR))
+            await channel.delete()
+
+        close_btn.callback = close_callback
+        close_view.add_item(close_btn)
+
+        await channel.send(
+            content=f"{member.mention} {''+owner_role.mention if owner_role else ''}",
+            embed=e,
+            view=close_view
+        )
+
+        await interaction.response.send_message(
+            embed=embed("✅ Ticket opened!", f"Head to {channel.mention}", OK),
+            ephemeral=True
+        )
+
+class ShopView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(PaymentSelect())
+
+# ── Setup command (owner role only) ───────────────────────────────
+@bot.command(name="setup")
+async def setup(ctx):
+    role = discord.utils.get(ctx.guild.roles, name=OWNER_ROLE)
+    if role not in ctx.author.roles:
+        await ctx.send(embed=embed("❌ No permission.", "You need the `.` role.", ERROR))
+        return
+
+    e = discord.Embed(
+        title="🐝 BSS Sign Shop",
+        description="Welcome! Pick your payment method below to open a ticket and purchase a **BSS Sign**.\n\n💰 **$0.40 in LTC**\n🎮 **100 Robux**",
+        color=ACCENT
+    )
+    e.set_footer(text="🐝 Honey Bee • Powered by Honey Bee Bot")
+    await ctx.send(embed=e, view=ShopView())
+    await ctx.message.delete()
+
+@bot.event
+async def on_ready():
+    await bot.change_presence(activity=discord.Game(name="🐝 BSS Signs Shop"))
+    bot.add_view(ShopView())  # persist view after restart
+    print(f"🐝 Honey Bee live as {bot.user}")
+
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandNotFound):
+        pass  # ignore unknown commands silently
+    else:
+        await ctx.send(embed=embed("💀 Error.", str(error), ERROR))
+
+# ── Wait before connecting ─────────────────────────────────────────
+print("⏳ Waiting 60 seconds before connecting to Discord...")
+time.sleep(60)
+
+bot.run(os.environ["DISCORD_TOKEN"])
