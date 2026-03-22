@@ -153,4 +153,19 @@ async def on_command_error(ctx, error):
 print("⏳ Waiting 60 seconds before connecting to Discord...")
 time.sleep(60)
 
-bot.run(os.environ["DISCORD_TOKEN"])
+import asyncio
+
+async def main():
+    try:
+        await bot.start(os.environ["DISCORD_TOKEN"])
+    except discord.errors.HTTPException as e:
+        if e.status == 429:
+            print(f"❌ Rate limited by Discord. Waiting 5 minutes...")
+            time.sleep(300)
+            await bot.start(os.environ["DISCORD_TOKEN"])
+        else:
+            print(f"❌ HTTP Error: {e}")
+    except Exception as e:
+        print(f"❌ Error: {e}")
+
+asyncio.run(main())
